@@ -15,6 +15,7 @@ from vllm.utils import FlexibleArgumentParser, str_to_int_tuple
 
 
 def nullable_str(val: str):
+    # 是否是 None
     if not val or val == "None":
         return None
     return val
@@ -619,6 +620,9 @@ class EngineArgs:
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:
+        """
+        参数是真的多
+        """
 
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
@@ -636,7 +640,9 @@ class EngineArgs:
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
 
+        # 设备信息
         device_config = DeviceConfig(device=self.device)
+        # 模型配置
         model_config = ModelConfig(
             model=self.model,
             tokenizer=self.tokenizer,
@@ -659,6 +665,7 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name)
+        # 缓存配置
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -667,6 +674,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching)
+        # 并行配置
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -681,6 +689,7 @@ class EngineArgs:
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend)
 
+        # 推测解码的配置
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -696,6 +705,7 @@ class EngineArgs:
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
         )
 
+        # 调度器配置
         scheduler_config = SchedulerConfig(
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
@@ -709,6 +719,7 @@ class EngineArgs:
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
         )
+        # LoRA配置
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
@@ -726,12 +737,14 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
+        # 加载配置
         load_config = LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
         )
 
+        # 视觉语言配置
         if self.image_input_type:
             if (not self.image_token_id or not self.image_input_shape
                     or not self.image_feature_size):
@@ -763,9 +776,11 @@ class EngineArgs:
         else:
             vision_language_config = None
 
+        # 解码配置
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
 
+        # 观测配置
         observability_config = ObservabilityConfig(
             otlp_traces_endpoint=self.otlp_traces_endpoint)
 
@@ -776,6 +791,7 @@ class EngineArgs:
                 "Chunked prefill is not supported with sliding window. "
                 "Set --disable-sliding-window to disable sliding window.")
 
+        # 配置汇总
         return EngineConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -803,6 +819,7 @@ class AsyncEngineArgs(EngineArgs):
                      async_args_only: bool = False) -> FlexibleArgumentParser:
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
+        # 添加一些异步特有的参数
         parser.add_argument('--engine-use-ray',
                             action='store_true',
                             help='Use Ray to start the LLM engine in a '

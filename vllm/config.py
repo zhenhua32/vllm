@@ -754,6 +754,9 @@ class SchedulerConfig:
 
 
 class DeviceConfig:
+    """
+    设备信息
+    """
 
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":

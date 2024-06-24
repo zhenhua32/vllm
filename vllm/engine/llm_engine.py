@@ -111,8 +111,10 @@ class LLMEngine:
         output: object,
         output_type: Type[_O],
     ) -> _O:
+        # 验证输出类型
         do_validate = cls.DO_VALIDATE_OUTPUT
 
+        # 参数类型检查
         if ((TYPE_CHECKING or do_validate)
                 and not isinstance(output, output_type)):
             raise TypeError(f"Expected output of type {output_type}, "
@@ -131,6 +133,7 @@ class LLMEngine:
         outputs_: List[_O]
         if TYPE_CHECKING or do_validate:
             outputs_ = []
+            # 一个个验证过去, 但没通过验证的直接就抛出异常了
             for output in outputs:
                 if not isinstance(output, output_type):
                     raise TypeError(f"Expected output of type {output_type}, "
@@ -217,16 +220,20 @@ class LLMEngine:
         self.log_stats = log_stats
 
         if not self.model_config.skip_tokenizer_init:
+            # 初始化分词器和反分词器
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
         else:
             self.tokenizer = None
             self.detokenizer = None
 
+        # 序列计数器
         self.seq_counter = Counter()
+        # 生成配置
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
+        # 这个应该是加载模型, 要好好看看. executor_class 还是通过参数传进来的
         self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,
@@ -239,6 +246,7 @@ class LLMEngine:
             load_config=load_config,
         )
 
+        # 不是嵌入模式, 就初始化 KV 缓存
         if not self.model_config.embedding_mode:
             self._initialize_kv_caches()
 
@@ -277,11 +285,14 @@ class LLMEngine:
                     parallel_config.disable_custom_all_reduce,
                 })
 
+
+        # 原来是自定义的 tokenizer, 所以有 ping 方法
         if self.tokenizer:
             # Ping the tokenizer to ensure liveness if it runs in a
             # different process.
             self.tokenizer.ping()
 
+        # 创建调度器, 也要看看
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
@@ -301,6 +312,7 @@ class LLMEngine:
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)
 
+        # 输出处理器
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
         self.output_processor = (
