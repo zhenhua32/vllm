@@ -92,6 +92,7 @@ class LLM:
     @classmethod
     @contextmanager
     def deprecate_legacy_api(cls):
+        """with 语句, 是否使用旧的API"""
         cls.DEPRECATE_LEGACY = True
 
         yield
@@ -119,8 +120,10 @@ class LLM:
         disable_custom_all_reduce: bool = False,
         **kwargs,
     ) -> None:
+        # disable_log_stats 没手动传入的话, 默认值是 true
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
+        # 参数都被组织在 EngineArgs 中
         engine_args = EngineArgs(
             model=model,
             tokenizer=tokenizer,
@@ -141,6 +144,7 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
+        # 实例化 LLMEngine
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
@@ -159,9 +163,11 @@ class LLM:
         if tokenizer.__class__.__name__.startswith("Cached"):
             self.llm_engine.tokenizer.tokenizer = tokenizer
         else:
+            # 获取一个缓存版本的 tokenizer, 速度更快些
             self.llm_engine.tokenizer.tokenizer = get_cached_tokenizer(
                 tokenizer)
 
+    # 现在有 overload 这种装饰器, 定义多种函数声明
     @overload  # LEGACY: single (prompt + optional token ids)
     def generate(
         self,
@@ -223,6 +229,7 @@ class LLM:
     ) -> List[RequestOutput]:
         ...
 
+    # 这里的是后续可能会演进的
     @overload
     def generate(
         self,
@@ -281,12 +288,14 @@ class LLM:
                 "LLM.generate() is only supported for generation models "
                 "(XForCausalLM).")
 
+        # 都会转成 inputs
         if prompt_token_ids is not None:
             inputs = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, List[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
             )
         else:
+            # 还有强制转类型的操作
             inputs = cast(
                 Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
                 prompts)
@@ -295,13 +304,15 @@ class LLM:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
+        # 添加请求
         self._validate_and_add_requests(
             inputs=inputs,
             params=sampling_params,
             lora_request=lora_request,
         )
-
+        # 获取输出
         outputs = self._run_engine(use_tqdm=use_tqdm)
+        # 验证并返回结果
         return LLMEngine.validate_outputs(outputs, RequestOutput)
 
     @overload  # LEGACY: single (prompt + optional token ids)
@@ -500,12 +511,15 @@ class LLM:
                       Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
     ) -> None:
+        # 必须是列表
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
             inputs = [inputs]
 
+        # 记录数量
         num_requests = len(inputs)
 
+        # 参数校验, 保证长度一致
         if isinstance(params, list) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
                              "must be the same.")
@@ -516,6 +530,7 @@ class LLM:
 
         # Add requests to the engine.
         for i, request_inputs in enumerate(inputs):
+            # 调用 _add_request
             self._add_request(
                 request_inputs,
                 params[i] if isinstance(params, Sequence) else params,
@@ -529,6 +544,7 @@ class LLM:
         params: Union[SamplingParams, PoolingParams],
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
     ) -> None:
+        # 构造一个递增的 request_id
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
                                     inputs,
@@ -540,6 +556,7 @@ class LLM:
     ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
+            # 未完成的请求数量
             num_requests = self.llm_engine.get_num_unfinished_requests()
             pbar = tqdm(
                 total=num_requests,
@@ -553,15 +570,19 @@ class LLM:
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
+            # 调用 step 方法
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
+                # 仅当完成时才添加到 outputs 中
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
+                            # 输入的总 token 数
                             total_in_toks += len(output.prompt_token_ids)
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                            # 输出的总 token 数
                             total_out_toks += sum(
                                 len(stp.token_ids) for stp in output.outputs)
                             out_spd = total_out_toks / pbar.format_dict[
@@ -575,4 +596,5 @@ class LLM:
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
+        # 必须要排序以保证是有序的, 即和输入的顺序一致
         return sorted(outputs, key=lambda x: int(x.request_id))
