@@ -619,6 +619,7 @@ def init_cached_hf_modules() -> None:
     """
     Lazy initialization of the Hugging Face modules.
     """
+    # 初始化 Hugging Face 模块
     from transformers.dynamic_module_utils import init_hf_modules
     init_hf_modules()
 

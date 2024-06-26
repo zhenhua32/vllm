@@ -95,10 +95,12 @@ class CPUCacheEngine:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> int:
+        # 总的公式就是 num_layers * (key_cache_block + value_cache_block) * dtype_size
         head_size = model_config.get_head_size()
         num_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
 
+        # block_size 默认是 16, Token block size for contiguous chunks of tokens.
         key_cache_block = block_size * num_heads * head_size
         value_cache_block = key_cache_block
         total = num_layers * (key_cache_block + value_cache_block)
@@ -106,6 +108,7 @@ class CPUCacheEngine:
             dtype = model_config.dtype
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
+        # 获取数据类型的字节数
         dtype_size = torch.tensor([], dtype=dtype).element_size()
         return dtype_size * total
 
@@ -154,6 +157,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
+        # runner 又是更小的单位
         self.model_runner = CPUModelRunner(
             model_config,
             parallel_config,
@@ -171,11 +175,13 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.cpu_cache: List[torch.Tensor]
 
     def init_device(self) -> None:
+        # 初始化分布式环境变量
         self.init_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
+        # 加载模型
         self.model_runner.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -191,6 +197,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         """
         # For CPU device, the block number will be calculated based on the
         # cpu_kvcache_space.
+        # 获取单个 block 的大小
         cache_block_size = self.get_cache_block_size_bytes()
         num_cpu_blocks = int(self.cache_config.cpu_kvcache_space_bytes //
                              cache_block_size)
@@ -232,6 +239,8 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                              "Try increasing `VLLM_CPU_KVCACHE_SPACE` when "
                              "initializing the engine.")
 
+        # 原来缓存空间不足是在这里抛出异常的. 需要能支持模型的最大序列长度
+        # 比如 max_model_len 是 32k 的, 就需要 32768 / 16 = 2048 个 block
         max_seq_len = self.cache_config.block_size * num_cpu_blocks
         if self.model_config.max_model_len > max_seq_len:
             raise ValueError(
@@ -242,6 +251,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                 "initializing the engine.")
 
     def _init_cache_engine(self) -> None:
+        # 在这里初始化 cache engine
         self.cache_engine = CPUCacheEngine(self.cache_config,
                                            self.model_config,
                                            self.parallel_config,
@@ -267,6 +277,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> List[SamplerOutput]:
+        """执行模型推理"""
 
         if execute_model_req is None:
             seq_group_metadata_list = None
@@ -287,18 +298,21 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_copy": execute_model_req.blocks_to_copy,
             }
+            # 广播数据
             broadcast_tensor_dict(data, src=0)
         else:
             data = broadcast_tensor_dict(src=0)
             num_seq_groups = data["num_seq_groups"]
             blocks_to_copy = data["blocks_to_copy"]
 
+        # 复制缓存
         self.cache_copy(blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
             return []
 
+        # 具体执行推理
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.cpu_cache)
 
@@ -311,6 +325,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         parallel_config = self.parallel_config
         rank = self.rank
         distributed_init_method = self.distributed_init_method
+        # cpu 的 world_size 只能是 1
         init_distributed_environment(
             world_size=parallel_config.world_size,
             rank=rank,

@@ -7,6 +7,7 @@ import torch
 
 
 def set_random_seed(seed: int) -> None:
+    """固定种子"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -30,6 +31,7 @@ def set_weight_attrs(
     if weight_attrs is None:
         return
     for key, value in weight_attrs.items():
+        # 如果属性已存在, 直接报错
         assert not hasattr(
             weight, key), (f"Overwriting existing tensor attribute: {key}")
         setattr(weight, key, value)
