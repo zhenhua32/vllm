@@ -18,6 +18,7 @@ class CPUExecutor(ExecutorBase):
 
     def _init_executor(self) -> None:
         assert self.device_config.device_type == "cpu"
+        # cpu 不支持 lora
         assert self.lora_config is None, "cpu backend doesn't support LoRA"
         self.model_config = _verify_and_get_model_config(self.model_config)
         self.cache_config = _verify_and_get_cache_config(self.cache_config)
@@ -28,8 +29,11 @@ class CPUExecutor(ExecutorBase):
         self._init_worker()
 
     def _init_worker(self):
+        """初始化工作者"""
+        # engine 的更小单位是 worker
         from vllm.worker.cpu_worker import CPUWorker
 
+        # 不支持分布式
         assert self.parallel_config.world_size == 1, (
             "CPUExecutor only supports single CPU socket currently.")
 
@@ -51,6 +55,7 @@ class CPUExecutor(ExecutorBase):
             is_driver_worker=True,
         )
         self.driver_worker.init_device()
+        # 加载模型
         self.driver_worker.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -79,6 +84,7 @@ class CPUExecutor(ExecutorBase):
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
+        # 方法是有的, 但其实不支持
         return self.driver_worker.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
@@ -88,6 +94,7 @@ class CPUExecutor(ExecutorBase):
         return self.driver_worker.list_loras()
 
     def check_health(self) -> None:
+        # 不需要健康检查
         # CPUExecutor will always be healthy as long as
         # it's running.
         return
@@ -98,6 +105,7 @@ class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
     async def execute_model_async(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        # 获取一个异步的执行模型的方法
         output = await make_async(self.driver_worker.execute_model
                                   )(execute_model_req=execute_model_req, )
         return output
@@ -110,12 +118,14 @@ class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
 
 def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
     if config.dtype == torch.float16:
+        # 没想到 cpu 不支持 float16, 反而支持 bfloat16
         logger.warning("float16 is not supported on CPU, casting to bfloat16.")
         config.dtype = torch.bfloat16
     if not config.enforce_eager:
         logger.warning(
             "CUDA graph is not supported on CPU, fallback to the eager "
             "mode.")
+        # 只支持动态图
         config.enforce_eager = True
     return config
 
@@ -139,10 +149,12 @@ def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
 
     if kv_cache_space >= 0:
         if kv_cache_space == 0:
+            # 默认 4GB 缓存空间
             config.cpu_kvcache_space_bytes = 4 * _GB  # type: ignore
             logger.warning("Environment variable VLLM_CPU_KVCACHE_SPACE (GB) "
                            "for CPU backend is not set, using 4 by default.")
         else:
+            # 单位是 GB
             config.cpu_kvcache_space_bytes = kv_cache_space * _GB  # type: ignore
     else:
         raise RuntimeError(

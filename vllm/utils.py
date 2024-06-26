@@ -227,7 +227,9 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     """
 
     def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future:
+        # 将函数封装在异步线程中
         loop = asyncio.get_event_loop()
+        # 替换成一个不需要参数的函数
         p_func = partial(func, *args, **kwargs)
         return loop.run_in_executor(executor=None, func=p_func)
 
