@@ -95,6 +95,7 @@ def _initialize_model(model_config: ModelConfig, load_config: LoadConfig,
     model_class = get_model_architecture(model_config)[0]
     quant_config = _get_quantization_config(model_config, load_config)
 
+    # 用配置初始化模型, 但不加载权重
     return model_class(config=model_config.hf_config,
                        cache_config=cache_config,
                        quant_config=quant_config,
@@ -159,13 +160,17 @@ class DefaultModelLoader(BaseModelLoader):
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
+        # 获取模型路径
         model_name_or_path = self._maybe_download_from_modelscope(
             model_name_or_path, revision) or model_name_or_path
 
+        # 模型是否已经存在本地
         is_local = os.path.isdir(model_name_or_path)
         load_format = self.load_config.load_format
         use_safetensors = False
         # Some quantized models use .pt files for storing the weights.
+        # 没想到有这么多格式. pt 是 torch save 的标准格式. bin 是 transformers 的常用格式
+        # safetensors 是transformers新推荐的更安全的格式
         if load_format == LoadFormat.AUTO:
             allow_patterns = ["*.safetensors", "*.bin"]
         elif load_format == LoadFormat.SAFETENSORS:
@@ -182,12 +187,14 @@ class DefaultModelLoader(BaseModelLoader):
             allow_patterns += ["*.pt"]
 
         if not is_local:
+            # 这里是 transformers 的下载
             hf_folder = download_weights_from_hf(model_name_or_path,
                                                  self.load_config.download_dir,
                                                  allow_patterns, revision)
         else:
             hf_folder = model_name_or_path
 
+        # 读取所有的权重文件
         hf_weights_files: List[str] = []
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
@@ -225,6 +232,7 @@ class DefaultModelLoader(BaseModelLoader):
         """Get an iterator for the model weights based on the load format."""
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             model_name_or_path, revision, fall_back_to_pt)
+        # 使用具体的权重迭代器
         if self.load_config.load_format == LoadFormat.NPCACHE:
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
@@ -256,11 +264,14 @@ class DefaultModelLoader(BaseModelLoader):
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
+        """加载模型, 主入口"""
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
+                # 初始化模型
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config,
                                           cache_config)
+            # 加载权重
             model.load_weights(
                 self._get_weights_iterator(model_config.model,
                                            model_config.revision,
@@ -272,6 +283,7 @@ class DefaultModelLoader(BaseModelLoader):
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
+                    # 量化权重
                     quant_method.process_weights_after_loading(module)
                 # FIXME: Remove this after Mixtral is updated
                 # to use quant_method.
@@ -816,6 +828,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
+    # 如果是个自定义的类, 就用这个类加载
     if isinstance(load_config.load_format, type):
         return load_config.load_format(load_config)
 

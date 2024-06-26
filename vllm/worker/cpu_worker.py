@@ -52,7 +52,7 @@ class CPUCacheEngine:
         else:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
-        # Get attention backend.
+        # Get attention backend. 还有个注意力后端, 估计也有多种实现
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
             self.model_config.get_head_size(),
@@ -75,6 +75,7 @@ class CPUCacheEngine:
             num_blocks, self.block_size, self.num_heads, self.head_size)
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
+            # 预先分配空间
             kv_cache.append(
                 torch.empty(kv_cache_shape, dtype=self.dtype, device="cpu"))
         return kv_cache
@@ -86,6 +87,7 @@ class CPUCacheEngine:
         raise NotImplementedError("Swap is not supported in CPUCacheEngine.")
 
     def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
+        # 复制数据
         self.attn_backend.copy_blocks(self.cpu_cache, src_to_dsts)
 
     @staticmethod

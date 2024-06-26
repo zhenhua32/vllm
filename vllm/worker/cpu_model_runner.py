@@ -55,6 +55,7 @@ class CPUModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
+        # 注意力后端
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
             self.model_config.get_head_size(),
@@ -79,6 +80,7 @@ class CPUModelRunner:
         self.model: nn.Module  # Set after init_Model
 
     def load_model(self) -> None:
+        """加载模型"""
         self.model = get_model(
             model_config=self.model_config,
             load_config=self.load_config,

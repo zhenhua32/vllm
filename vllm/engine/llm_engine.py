@@ -334,6 +334,7 @@ class LLMEngine:
         The workers will determine the number of blocks in both the GPU cache
         and the swap CPU cache.
         """
+        # 计算块数
         num_gpu_blocks, num_cpu_blocks = (
             self.model_executor.determine_num_available_blocks())
 
@@ -372,6 +373,7 @@ class LLMEngine:
             from vllm.executor.tpu_executor import TPUExecutor
             executor_class = TPUExecutor
         elif engine_config.device_config.device_type == "cpu":
+            # cpu 的可以看下
             from vllm.executor.cpu_executor import CPUExecutor
             executor_class = CPUExecutor
         elif engine_config.device_config.device_type == "xpu":
@@ -383,6 +385,7 @@ class LLMEngine:
                 from vllm.executor.xpu_executor import XPUExecutor
                 executor_class = XPUExecutor
         elif distributed_executor_backend == "ray":
+            # 分布式的也应该看下
             initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
             executor_class = RayGPUExecutor
@@ -391,6 +394,7 @@ class LLMEngine:
                 MultiprocessingGPUExecutor)
             executor_class = MultiprocessingGPUExecutor
         else:
+            # GPU 的也要看下
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
 

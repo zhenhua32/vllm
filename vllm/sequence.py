@@ -888,7 +888,7 @@ class HiddenStates:
 @dataclass
 class ExecuteModelRequest:
     """The model execution request."""
-    # The sequence group metadata list.
+    # The sequence group metadata list. 主要的数据都封装在这里
     seq_group_metadata_list: List[SequenceGroupMetadata]
     # Blocks to swap in. List of CPU -> GPU block number.
     blocks_to_swap_in: List[Tuple[int, int]] = field(default_factory=list)

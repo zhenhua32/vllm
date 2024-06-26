@@ -17,6 +17,7 @@ def get_model(*, model_config: ModelConfig, load_config: LoadConfig,
               lora_config: Optional[LoRAConfig],
               vision_language_config: Optional[VisionLanguageConfig],
               cache_config: CacheConfig) -> nn.Module:
+    # 不同类型的模型加载器
     loader = get_model_loader(load_config)
     return loader.load_model(model_config=model_config,
                              device_config=device_config,
