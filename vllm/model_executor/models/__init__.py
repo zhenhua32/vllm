@@ -8,6 +8,7 @@ from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
+# 模型架构映射
 # Architecture -> (module, class).
 _GENERATION_MODELS = {
     "AquilaModel": ("llama", "LlamaForCausalLM"),
@@ -63,10 +64,12 @@ _GENERATION_MODELS = {
     "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
 
+# 就这个特殊的
 _EMBEDDING_MODELS = {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
 }
 
+# 生成模型和嵌入模型
 _MODELS = {**_GENERATION_MODELS, **_EMBEDDING_MODELS}
 
 # Architecture -> type.
@@ -96,7 +99,7 @@ class ModelRegistry:
             return _OOT_MODELS[model_arch]
         if model_arch not in _MODELS:
             return None
-        if is_hip():
+        if is_hip():  # AMD GPU
             if model_arch in _ROCM_UNSUPPORTED_MODELS:
                 raise ValueError(
                     f"Model architecture {model_arch} is not supported by "
@@ -119,6 +122,7 @@ class ModelRegistry:
 
     @staticmethod
     def register_model(model_arch: str, model_cls: Type[nn.Module]):
+        """可以主动注册模型, 会保存在 _OOT_MODELS 里"""
         if model_arch in _MODELS:
             logger.warning(
                 "Model architecture %s is already registered, and will be "
@@ -129,6 +133,7 @@ class ModelRegistry:
 
     @staticmethod
     def is_embedding_model(model_arch: str) -> bool:
+        """是否是嵌入模型"""
         return model_arch in _EMBEDDING_MODELS
 
 

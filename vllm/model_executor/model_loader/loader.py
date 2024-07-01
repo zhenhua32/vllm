@@ -94,6 +94,7 @@ def _initialize_model(model_config: ModelConfig, load_config: LoadConfig,
     """Initialize a model with the given configurations."""
     # 获取具体的模型类
     model_class = get_model_architecture(model_config)[0]
+    # 获取量化配置
     quant_config = _get_quantization_config(model_config, load_config)
 
     # 用配置初始化模型, 但不加载权重

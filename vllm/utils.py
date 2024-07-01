@@ -131,6 +131,7 @@ class LRUCache(Generic[T]):
 
 
 def is_hip() -> bool:
+    """判断是否是 AMD 显卡"""
     return torch.version.hip is not None
 
 
