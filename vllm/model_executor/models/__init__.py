@@ -106,7 +106,9 @@ class ModelRegistry:
                     "Model architecture %s is partially supported by ROCm: %s",
                     model_arch, _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
 
+        # _MODELS 列出了所有支持的模型
         module_name, model_cls_name = _MODELS[model_arch]
+        # 加载具体的模块
         module = importlib.import_module(
             f"vllm.model_executor.models.{module_name}")
         return getattr(module, model_cls_name, None)

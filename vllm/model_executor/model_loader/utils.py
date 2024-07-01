@@ -29,6 +29,7 @@ def get_model_architecture(
         architectures = ["QuantMixtralForCausalLM"]
 
     for arch in architectures:
+        # 尝试获取模型类
         model_cls = ModelRegistry.load_model_cls(arch)
         if model_cls is not None:
             return (model_cls, arch)

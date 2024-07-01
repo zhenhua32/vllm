@@ -41,10 +41,12 @@ def get_attn_backend(
             BlocksparseFlashAttentionBackend)
         return BlocksparseFlashAttentionBackend
 
+    # 判断使用哪个注意力后端
     backend = which_attn_to_use(num_heads, head_size, num_kv_heads,
                                 sliding_window, dtype, kv_cache_dtype,
                                 block_size)
     if backend == _Backend.FLASH_ATTN:
+        # 这个是默认值
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
         return FlashAttentionBackend
@@ -59,12 +61,14 @@ def get_attn_backend(
             ROCmFlashAttentionBackend)
         return ROCmFlashAttentionBackend
     elif backend == _Backend.TORCH_SDPA:
+        # 只支持 cpu
         assert is_cpu(), RuntimeError(
             "Torch SDPA backend is only used for the CPU device.")
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
         return TorchSDPABackend
     elif backend == _Backend.IPEX:
+        # 只支持 xpu
         assert is_xpu(), RuntimeError(
             "IPEX attention backend is only used for the XPU device.")
         logger.info("Using IPEX attention backend.")
@@ -94,10 +98,10 @@ def which_attn_to_use(
     block_size: int,
 ) -> _Backend:
     """Returns which flash attention backend to use."""
-    # Default case.
+    # Default case. 优先尝试用 FLASH_ATTN, 不行就退回 XFORMERS
     selected_backend = _Backend.FLASH_ATTN
 
-    # Check the environment variable and override if specified
+    # Check the environment variable and override if specified 从环境变量中读取
     backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
     if backend_by_env_var is not None:
         backend_members = _Backend.__members__
@@ -109,16 +113,19 @@ def which_attn_to_use(
         selected_backend = _Backend[backend_by_env_var]
 
     if is_cpu():
+        # cpu 只支持这个版本
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return _Backend.TORCH_SDPA
 
     if is_xpu():
+        # xpu 只支持这个版本
         if selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         return _Backend.IPEX
 
     if is_tpu():
+        # TPU 只支持这个版本
         if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
         return _Backend.PALLAS
@@ -129,24 +136,28 @@ def which_attn_to_use(
                             == _Backend.FLASH_ATTN else selected_backend)
         if selected_backend == _Backend.ROCM_FLASH:
             if torch.cuda.get_device_capability()[0] != 9:
-                # not Instinct series GPUs.
+                # not Instinct series GPUs. 仅支持特定系列的 GPU
                 logger.info("flash_attn is not supported on NAVI GPUs.")
         else:
+            # AMD GPU 也仅支持 ROCM_FLASH
             logger.info("%s is not supported in AMD GPUs.", selected_backend)
         return _Backend.ROCM_FLASH
 
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
         if torch.cuda.get_device_capability()[0] < 8:
+            # 我的 1660ti 就是 7.5
             # Volta and Turing NVIDIA GPUs.
             logger.info(
                 "Cannot use FlashAttention-2 backend for Volta and Turing "
                 "GPUs.")
+            # 低版本不支持 FlashAttention-2, 切换成 XFORMERS
             selected_backend = _Backend.XFORMERS
         elif dtype not in (torch.float16, torch.bfloat16):
             logger.info(
                 "Cannot use FlashAttention-2 backend for dtype other than "
                 "torch.float16 or torch.bfloat16.")
+            # lashAttention-2 的要求也好多
             selected_backend = _Backend.XFORMERS
         elif kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
             logger.info(
@@ -156,6 +167,7 @@ def which_attn_to_use(
             logger.info(
                 "Cannot use FlashAttention-2 backend for block size not "
                 "divisible by 16.")
+            # 还需要被 16 整除
             selected_backend = _Backend.XFORMERS
         elif sliding_window is not None:
             logger.info(
@@ -171,6 +183,7 @@ def which_attn_to_use(
                 FlashAttentionBackend)
 
             supported_sizes = FlashAttentionBackend.get_supported_head_sizes()
+            # 还有 head_size 的限制
             if head_size not in supported_sizes:
                 logger.info(
                     "Cannot use FlashAttention-2 backend for head size %d.",

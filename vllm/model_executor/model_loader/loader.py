@@ -92,6 +92,7 @@ def _initialize_model(model_config: ModelConfig, load_config: LoadConfig,
                       vision_language_config: Optional[VisionLanguageConfig],
                       cache_config: CacheConfig) -> nn.Module:
     """Initialize a model with the given configurations."""
+    # 获取具体的模型类
     model_class = get_model_architecture(model_config)[0]
     quant_config = _get_quantization_config(model_config, load_config)
 
@@ -844,4 +845,5 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     if load_config.load_format == LoadFormat.BITSANDBYTES:
         return BitsAndBytesModelLoader(load_config)
 
+    # 先看默认的模型加载器
     return DefaultModelLoader(load_config)

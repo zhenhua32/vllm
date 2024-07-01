@@ -106,10 +106,12 @@ class CPUModelRunner:
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
+            # 只能有一个序列id
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
 
+            # 获取序列数据
             seq_data = seq_group_metadata.seq_data[seq_id]
             prompt_tokens = seq_data.get_token_ids()
             computed_len = seq_data.get_num_computed_tokens()
@@ -123,6 +125,7 @@ class CPUModelRunner:
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
 
+            # 多模态数据
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data is not None:
                 # Process multi-modal data
@@ -147,10 +150,12 @@ class CPUModelRunner:
                 start_idx = max(0, seq_len - self.sliding_window)
 
             for i in range(computed_len, seq_len):
+                # 小于初始索引就填充
                 if i < start_idx:
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
 
+                # 计算应用哪个块, 偏移量
                 block_number = block_table[i //
                                            self.block_size]  # type: ignore
                 block_offset = i % self.block_size  # type: ignore
@@ -164,6 +169,7 @@ class CPUModelRunner:
 
         num_prompt_tokens = len(input_tokens)
 
+        # 初始化输入数据
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
@@ -174,6 +180,7 @@ class CPUModelRunner:
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
 
+        # 用于注意力的元数据
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             seq_lens=seq_lens,
@@ -207,6 +214,7 @@ class CPUModelRunner:
 
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
+                # 获取生成的 token
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append(generation_token)
 
@@ -221,15 +229,19 @@ class CPUModelRunner:
                 block_table = seq_group_metadata.block_tables[seq_id]
                 block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
+                # 计算槽位
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
                 if self.sliding_window is not None:
+                    # 滑动窗口的块数
                     sliding_window_blocks = (self.sliding_window //
                                              self.block_size)
+                    # 只选择最后的滑动窗口块数
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
+        # 最大解码序列长度
         max_decode_seq_len = max(seq_lens)
 
         input_tokens = torch.tensor(input_tokens,
@@ -245,6 +257,7 @@ class CPUModelRunner:
                                        dtype=torch.int,
                                        device=self.device)
 
+        # 构建新的 block_tables
         max_block_table_len = max(
             len(block_table) for block_table in block_tables)
         block_tables = make_tensor_with_pad(
@@ -277,20 +290,24 @@ class CPUModelRunner:
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Optional[Dict[str, torch.Tensor]]]:
+        """准备输入数据"""
         multi_modal_kwargs = None
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
-            # all decodes.
+            # all decodes. 判断是否是 prompt
             is_prompt = seq_group_metadata_list[0].is_prompt
             # Prepare input tensors.
             if is_prompt:
+                # 调用输入数据准备函数
                 (input_tokens, input_positions, attn_metadata, seq_lens,
                  multi_modal_kwargs
                  ) = self._prepare_prompt(seq_group_metadata_list)
             else:
+                # 调用解码准备函数
                 (input_tokens, input_positions,
                  attn_metadata) = self._prepare_decode(seq_group_metadata_list)
                 seq_lens = []
+            # 采样信息准备
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list,
                 seq_lens,
@@ -310,6 +327,7 @@ class CPUModelRunner:
             metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
+            # 接受数据, 并重新变量
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
@@ -334,6 +352,7 @@ class CPUModelRunner:
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
+        """主入口, 执行推理"""
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          multi_modal_input
          ) = self.prepare_input_tensors(seq_group_metadata_list)
@@ -348,16 +367,17 @@ class CPUModelRunner:
         if self.vision_language_config and multi_modal_input is not None:
             execute_model_kwargs.update(multi_modal_input)
 
+        # 调用模型推理
         hidden_states = model_executable(**execute_model_kwargs)
 
-        # Compute the logits.
+        # Compute the logits. 计算 logits
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
             return None
 
-        # Sample the next token.
+        # Sample the next token. 获取下一个 token
         output = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,
