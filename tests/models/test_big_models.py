@@ -8,13 +8,14 @@ import pytest
 import torch
 
 MODELS = [
-    "meta-llama/Llama-2-7b-hf",
+    # "meta-llama/Llama-2-7b-hf",
     # "mistralai/Mistral-7B-v0.1",  # Tested by test_mistral.py
     # "Deci/DeciLM-7b",  # Broken
     # "tiiuae/falcon-7b",  # Broken
-    "EleutherAI/gpt-j-6b",
+    # "EleutherAI/gpt-j-6b",
     # "mosaicml/mpt-7b",  # Broken
     # "Qwen/Qwen1.5-0.5B"  # Broken,
+    "/root/home/my_model/Qwen2-7B-Instruct" ,
 ]
 
 #TODO: remove this after CPU float16 support ready
@@ -34,6 +35,8 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
+    print("example_prompts====")
+    print(example_prompts)
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
