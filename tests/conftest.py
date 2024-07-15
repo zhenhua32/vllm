@@ -165,8 +165,10 @@ class HfRunner:
             if is_vision_model:
                 auto_cls = AutoModelForVision2Seq
             else:
+                # 语言生成模型
                 auto_cls = AutoModelForCausalLM
 
+            # 加载模型
             model_kwargs = model_kwargs if model_kwargs is not None else {}
             self.model = self.wrap_device(
                 auto_cls.from_pretrained(
@@ -193,6 +195,8 @@ class HfRunner:
                 "Unable to auto-load processor from HuggingFace for "
                 "model %s. Using tokenizer instead.", model_name)
             self.processor = self.tokenizer
+        
+        print(self.model.dtype, self.model.device)
 
     def generate(
         self,
@@ -200,6 +204,7 @@ class HfRunner:
         images: Optional[List[Image.Image]] = None,
         **kwargs,
     ) -> List[Tuple[List[List[int]], List[str]]]:
+        # 主函数
         if images:
             assert len(prompts) == len(images)
 
@@ -213,7 +218,9 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
 
             inputs = self.processor(**processor_kwargs)
+            print("inputs:", inputs)
 
+            # 调用生成方法
             output_ids = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
@@ -222,7 +229,7 @@ class HfRunner:
             output_str = self.processor.batch_decode(
                 output_ids,
                 skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
+                clean_up_tokenization_spaces=False,  # 这个果然一般都是选择否的
             )
             output_ids = output_ids.cpu().tolist()
             outputs.append((output_ids, output_str))
@@ -235,8 +242,9 @@ class HfRunner:
         images: Optional[List[Image.Image]] = None,
         **kwargs,
     ) -> List[Tuple[List[int], str]]:
+        """贪婪解码版本"""
         outputs = self.generate(prompts,
-                                do_sample=False,
+                                do_sample=False,  # 就只设置了这个值
                                 max_new_tokens=max_tokens,
                                 images=images,
                                 **kwargs)
@@ -460,6 +468,7 @@ class VllmRunner:
         max_tokens: int,
         images: Optional[List[MultiModalData]] = None,
     ) -> List[Tuple[List[int], str]]:
+        # 贪婪解码是通过将 temperature 设置为 0 来实现的
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)
         return [(output_ids[0], output_str[0])
