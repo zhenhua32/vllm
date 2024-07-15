@@ -231,14 +231,17 @@ class Qwen2Model(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
+        # 一个嵌入层
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
         )
+        # 解码层列表
         self.layers = nn.ModuleList([
             Qwen2DecoderLayer(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
+        # RMSNorm 层
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -249,7 +252,7 @@ class Qwen2Model(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
-        residual = None
+        residual = None  # 残差
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states, residual = layer(
@@ -295,6 +298,7 @@ class Qwen2ForCausalLM(nn.Module):
     ) -> None:
         del lora_config
         # TODO (@robertgshaw2): see if this can be moved out
+        # 需要 max_window_layers == num_hidden_layers
         if (cache_config.sliding_window is not None
                 and hasattr(config, "max_window_layers")):
             raise ValueError("Sliding window for some but all layers is not "
@@ -309,8 +313,10 @@ class Qwen2ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
+        # 初始化模型
         self.model = Qwen2Model(config, cache_config, quant_config)
 
+        # 权重绑定
         if config.tie_word_embeddings:
             self.lm_head_weight = self.model.embed_tokens.weight
         else:
@@ -328,12 +334,14 @@ class Qwen2ForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        """推理流程"""
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        """计算logits"""
         logits = self.logits_processor(self.lm_head_weight, hidden_states,
                                        sampling_metadata)
         return logits
@@ -343,10 +351,12 @@ class Qwen2ForCausalLM(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
+        """采样下一个token"""
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        """加载权重"""
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -370,9 +380,11 @@ class Qwen2ForCausalLM(nn.Module):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
+                # 加载权重
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # 这是 for else, 所以如果没有 break, 会执行这里
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
