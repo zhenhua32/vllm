@@ -10,14 +10,14 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import (STR_BACKEND_ENV_VAR, is_cpu, is_hip, is_openvino,
-                        is_tpu, is_xpu)
+from vllm.utils import STR_BACKEND_ENV_VAR, is_hip, is_openvino
 
 logger = init_logger(__name__)
 
 
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
+    FLASH_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
@@ -25,6 +25,7 @@ class _Backend(enum.Enum):
     FLASHINFER = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+    NO_ATTENTION = enum.auto()
 
 
 def backend_name_to_enum(backend_name: str) -> _Backend:
@@ -89,13 +90,11 @@ def get_global_forced_attn_backend() -> Optional[_Backend]:
 
 @lru_cache(maxsize=None)
 def get_attn_backend(
-    num_heads: int,
     head_size: int,
-    num_kv_heads: int,
-    sliding_window: Optional[int],
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
+    is_attention_free: bool,
     is_blocksparse: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
@@ -106,15 +105,17 @@ def get_attn_backend(
             BlocksparseFlashAttentionBackend)
         return BlocksparseFlashAttentionBackend
 
-    # 判断使用哪个注意力后端
-    backend = which_attn_to_use(num_heads, head_size, num_kv_heads,
-                                sliding_window, dtype, kv_cache_dtype,
-                                block_size)
+    backend = which_attn_to_use(head_size, dtype, kv_cache_dtype, block_size,
+                                is_attention_free)
     if backend == _Backend.FLASH_ATTN:
         # 这个是默认值
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
         return FlashAttentionBackend
+    if backend == _Backend.FLASH_ATTN_VLLM_V1:
+        from vllm.v1.attention.backends.flash_attn import (  # noqa: F401
+            FlashAttentionBackend as FlashAttentionBackendV1)
+        return FlashAttentionBackendV1
     if backend == _Backend.XFORMERS:
         logger.info("Using XFormers backend.")
         from vllm.attention.backends.xformers import (  # noqa: F401
@@ -126,8 +127,7 @@ def get_attn_backend(
             ROCmFlashAttentionBackend)
         return ROCmFlashAttentionBackend
     elif backend == _Backend.TORCH_SDPA:
-        # 只支持 cpu
-        assert is_cpu(), RuntimeError(
+        assert current_platform.is_cpu(), RuntimeError(
             "Torch SDPA backend is only used for the CPU device.")
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
@@ -137,8 +137,7 @@ def get_attn_backend(
         from vllm.attention.backends.openvino import OpenVINOAttentionBackend
         return OpenVINOAttentionBackend
     elif backend == _Backend.IPEX:
-        # 只支持 xpu
-        assert is_xpu(), RuntimeError(
+        assert current_platform.is_xpu(), RuntimeError(
             "IPEX attention backend is only used for the XPU device.")
         logger.info("Using IPEX attention backend.")
         from vllm.attention.backends.ipex_attn import IpexAttnBackend
@@ -151,22 +150,29 @@ def get_attn_backend(
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend
         return PallasAttentionBackend
+    elif backend == _Backend.NO_ATTENTION:
+        from vllm.attention.backends.placeholder_attn import (
+            PlaceholderAttentionBackend)
+        return PlaceholderAttentionBackend
     else:
         raise ValueError("Invalid attention backend.")
 
 
 def which_attn_to_use(
-    num_heads: int,
     head_size: int,
-    num_kv_heads: int,
-    sliding_window: Optional[int],
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
+    is_attention_free: bool,
 ) -> _Backend:
     """Returns which flash attention backend to use."""
     # Default case. 优先尝试用 FLASH_ATTN, 不行就退回 XFORMERS
     selected_backend = _Backend.FLASH_ATTN
+
+    # If there are no attention layers (e.g. we are running Mamba),
+    # use the placeholder NO_ATTENTION
+    if is_attention_free:
+        return _Backend.NO_ATTENTION
 
     # Check whether a particular choice of backend was
     # previously forced.
@@ -183,8 +189,7 @@ def which_attn_to_use(
         if backend_by_env_var is not None:
             selected_backend = backend_name_to_enum(backend_by_env_var)
 
-    if is_cpu():
-        # cpu 只支持这个版本
+    if current_platform.is_cpu():
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return _Backend.TORCH_SDPA
@@ -194,14 +199,12 @@ def which_attn_to_use(
             logger.info("Cannot use %s backend on OpenVINO.", selected_backend)
         return _Backend.OPENVINO
 
-    if is_xpu():
-        # xpu 只支持这个版本
+    if current_platform.is_xpu():
         if selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         return _Backend.IPEX
 
-    if is_tpu():
-        # TPU 只支持这个版本
+    if current_platform.is_tpu():
         if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
         return _Backend.PALLAS
@@ -211,18 +214,20 @@ def which_attn_to_use(
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if selected_backend == _Backend.ROCM_FLASH:
-            if current_platform.get_device_capability()[0] != 9:
-                # not Instinct series GPUs. 仅支持特定系列的 GPU
+            if not current_platform.has_device_capability(90):
+                # not Instinct series GPUs.
                 logger.info("flash_attn is not supported on NAVI GPUs.")
         else:
             # AMD GPU 也仅支持 ROCM_FLASH
             logger.info("%s is not supported in AMD GPUs.", selected_backend)
         return _Backend.ROCM_FLASH
 
+    if envs.VLLM_USE_V1:
+        return _Backend.FLASH_ATTN_VLLM_V1
+
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
-        if current_platform.get_device_capability()[0] < 8:
-            # 我的 1660ti 就是 7.5
+        if not current_platform.has_device_capability(80):
             # Volta and Turing NVIDIA GPUs.
             logger.info(
                 "Cannot use FlashAttention-2 backend for Volta and Turing "
@@ -238,6 +243,10 @@ def which_attn_to_use(
         elif kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
             logger.info(
                 "Cannot use FlashAttention-2 backend for FP8 KV cache.")
+            logger.warning(
+                "Please use FlashInfer backend with FP8 KV Cache for "
+                "better performance by setting environment variable  "
+                "VLLM_ATTENTION_BACKEND=FLASHINFER")
             selected_backend = _Backend.XFORMERS
         elif block_size % 16 != 0:
             logger.info(
@@ -245,16 +254,11 @@ def which_attn_to_use(
                 "divisible by 16.")
             # 还需要被 16 整除
             selected_backend = _Backend.XFORMERS
-        elif sliding_window is not None:
-            logger.info(
-                "Cannot use FlashAttention-2 backend due to sliding window.")
-            selected_backend = _Backend.XFORMERS
 
     # FlashAttn is valid for the model, checking if the package is installed.
     if selected_backend == _Backend.FLASH_ATTN:
         try:
-            import vllm_flash_attn  # noqa: F401
-
+            import vllm.vllm_flash_attn  # noqa: F401
             from vllm.attention.backends.flash_attn import (  # noqa: F401
                 FlashAttentionBackend)
 
@@ -268,8 +272,9 @@ def which_attn_to_use(
         except ImportError:
             logger.info(
                 "Cannot use FlashAttention-2 backend because the "
-                "vllm_flash_attn package is not found. "
-                "`pip install vllm-flash-attn` for better performance.")
+                "vllm.vllm_flash_attn package is not found. "
+                "Make sure that vllm_flash_attn was built and installed "
+                "(on by default).")
             selected_backend = _Backend.XFORMERS
 
     return selected_backend
