@@ -286,5 +286,6 @@ class AsyncEngineRPCClient:
 
     async def encode(self, *args,
                      **kwargs) -> AsyncGenerator[EmbeddingRequestOutput, None]:
+        # 应该是因为没实现 yield 方法
         raise NotImplementedError(
             "Embeddings not supported with multiprocessing backend")
