@@ -340,28 +340,30 @@ class Qwen2VisionPatchEmbed(nn.Module):
 
     def __init__(
         self,
-        patch_size: int = 14,
-        temporal_patch_size: int = 2,
-        in_chans: int = 3,
-        embed_dim: int = 1152,
+        patch_size: int = 14,  # 14
+        temporal_patch_size: int = 2,  # 2
+        in_chans: int = 3,  # 3
+        embed_dim: int = 1152,  # 1280
     ) -> None:
         super().__init__()
-        self.patch_size = patch_size
-        self.temporal_patch_size = temporal_patch_size
-        self.embed_dim = embed_dim
+        self.patch_size = patch_size  # 14
+        self.temporal_patch_size = temporal_patch_size  # 2
+        self.embed_dim = embed_dim  # 1280
 
-        kernel_size = [temporal_patch_size, patch_size, patch_size]
-        self.proj = nn.Conv3d(in_chans,
-                              embed_dim,
-                              kernel_size=kernel_size,
-                              stride=kernel_size,
+        kernel_size = [temporal_patch_size, patch_size, patch_size]  # [2, 14, 14]
+        self.proj = nn.Conv3d(in_chans,  # 3
+                              embed_dim,  # 1280
+                              kernel_size=kernel_size,  # [2, 14, 14]
+                              stride=kernel_size,  # [2, 14, 14]
                               bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """返回的 shape 是 (num_patches=14308, 1280)"""
+        # x 的 shape 是 (14308, 1176)
         L, C = x.shape
         x = x.view(L, -1, self.temporal_patch_size, self.patch_size,
-                   self.patch_size)
-        x = self.proj(x).view(L, self.embed_dim)
+                   self.patch_size)  # (14308, 3, 2, 14, 14)
+        x = self.proj(x).view(L, self.embed_dim)  # (14308, 1280)
         return x
 
 
@@ -407,10 +409,11 @@ class Qwen2VisionRotaryEmbedding(nn.Module):
 
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
-        self.dim = dim
-        self.theta = theta
+        self.dim = dim  # 40
+        self.theta = theta  # 10000.0
         inv_freq = 1.0 / (theta
                           **(torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        # inv_freq shape 是 (20,)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._seq_len_cached = 0
         self._freqs_cached = None
@@ -429,8 +432,9 @@ class Qwen2VisionRotaryEmbedding(nn.Module):
             self._freqs_cached = freqs
 
     def forward(self, seqlen: int) -> torch.Tensor:
+        """返回的 shape 是 (seqlen, 20)"""
         self.update_freqs_cache(seqlen)
-        return self._freqs_cached[:seqlen]
+        return self._freqs_cached[:seqlen]  # (seqlen, 20)
 
 
 class Qwen2VisionTransformer(nn.Module):
@@ -443,41 +447,42 @@ class Qwen2VisionTransformer(nn.Module):
     ) -> None:
         super().__init__()
 
-        patch_size: int = vision_config.patch_size
-        temporal_patch_size: int = vision_config.temporal_patch_size
-        spatial_merge_size: int = vision_config.spatial_merge_size
-        in_chans: int = vision_config.in_chans
-        hidden_size: int = vision_config.hidden_size
-        embed_dim: int = vision_config.embed_dim
-        depth: int = vision_config.depth
-        num_heads: int = vision_config.num_heads
-        mlp_ratio: float = vision_config.mlp_ratio
+        # 以 Qwen2-VL-7B-Instruct_config 为例, 标注下输入输出的 shape
+        patch_size: int = vision_config.patch_size  # 14
+        temporal_patch_size: int = vision_config.temporal_patch_size  # 2
+        spatial_merge_size: int = vision_config.spatial_merge_size  # 2
+        in_chans: int = vision_config.in_chans  # 3
+        hidden_size: int = vision_config.hidden_size  # 3584
+        embed_dim: int = vision_config.embed_dim  # 1280
+        depth: int = vision_config.depth  # 32
+        num_heads: int = vision_config.num_heads  # 16
+        mlp_ratio: float = vision_config.mlp_ratio  # 4
 
-        self.spatial_merge_size = spatial_merge_size
+        self.spatial_merge_size = spatial_merge_size  # 2
 
         self.patch_embed = Qwen2VisionPatchEmbed(
-            patch_size=patch_size,
-            temporal_patch_size=temporal_patch_size,
-            in_chans=in_chans,
-            embed_dim=embed_dim,
+            patch_size=patch_size,  # 14
+            temporal_patch_size=temporal_patch_size,  # 2
+            in_chans=in_chans,  # 3
+            embed_dim=embed_dim,  # 1280
         )
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
-        head_dim = embed_dim // num_heads
-        self.rotary_pos_emb = Qwen2VisionRotaryEmbedding(head_dim // 2)
+        head_dim = embed_dim // num_heads  # 80
+        self.rotary_pos_emb = Qwen2VisionRotaryEmbedding(head_dim // 2)  # 40
 
         self.blocks = nn.ModuleList([
             Qwen2VisionBlock(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
+                dim=embed_dim,  # 1280
+                num_heads=num_heads,  # 16
+                mlp_ratio=mlp_ratio,  # 4
                 norm_layer=norm_layer,
                 quant_config=quant_config,
             ) for _ in range(depth)
         ])
         self.merger = Qwen2VisionPatchMerger(
-            d_model=hidden_size,
-            context_dim=embed_dim,
+            d_model=hidden_size,  # 3584
+            context_dim=embed_dim,  # 1280
             norm_layer=norm_layer,
             quant_config=quant_config,
         )
@@ -492,49 +497,53 @@ class Qwen2VisionTransformer(nn.Module):
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         pos_ids = []
-        for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+        for t, h, w in grid_thw:  # grid_thw shape 是 (1, 3), 假设值是 1,  98, 146
+            # t=1, h=98, w=146
+            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)  # (98, 146)
+            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)   # (98, 146)
             hpos_ids = hpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            ).permute(0, 2, 1, 3).flatten()
+                h // self.spatial_merge_size,  # 49
+                self.spatial_merge_size,  # 2
+                w // self.spatial_merge_size,  # 73
+                self.spatial_merge_size,  # 2
+            ).permute(0, 2, 1, 3).flatten()  # (49, 73, 2, 2) => 14308
             wpos_ids = wpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            ).permute(0, 2, 1, 3).flatten()
+                h // self.spatial_merge_size,  # 49
+                self.spatial_merge_size,  # 2
+                w // self.spatial_merge_size,  # 73
+                self.spatial_merge_size,  # 2
+            ).permute(0, 2, 1, 3).flatten()  # (49, 73, 2, 2) => 14308
             pos_ids.append(
-                torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
-        pos_ids = torch.cat(pos_ids, dim=0)
-        max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
+                torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))  # (14308, 2)
+        pos_ids = torch.cat(pos_ids, dim=0)  # (14308, 2)
+        max_grid_size = grid_thw[:, 1:].max()  # 146
+        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)  # (292, 20)
+        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)  # (14308, 2, 20) => (14308, 40)
         return rotary_pos_emb
 
     def forward(
         self,
-        x: torch.Tensor,
-        grid_thw: torch.Tensor,
+        x: torch.Tensor,  # (14308, 1176)
+        grid_thw: torch.Tensor,  # (1, 3)
     ) -> torch.Tensor:
         # patchify
+        # x 的 shape 是 (14308, 1176)
         x = x.to(device=self.device, dtype=self.dtype)
-        x = self.patch_embed(x)
+        x = self.patch_embed(x)  # (14308, 1280)
 
         # compute position embedding
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)  # (14308, 40)
 
         # compute cu_seqlens
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
                                              grid_thw[:, 0]).cumsum(
                                                  dim=0, dtype=torch.int32)
+        # cu_seqlens 的值是 [14308]
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
+        # cu_seqlens 的值是 [0, 14308]
 
         # transformers
-        x = x.unsqueeze(1)
+        x = x.unsqueeze(1)  # (14308, 1, 1280)
         for blk in self.blocks:
             x = blk(x, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
 
@@ -929,6 +938,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
+        # 主要多了一个视觉模型
         self.visual = Qwen2VisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
@@ -965,16 +975,22 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                              f"Got type: {type(mm_input)}")
         if isinstance(mm_input, torch.Tensor):
             if mm_input.ndim == 2:
+                # 两个维度的情况下，直接返回
                 return mm_input
             if mm_input.ndim != 3:
                 raise ValueError(f"{name} should be 2D or batched 3D tensor. "
                                  f"Got ndim: {mm_input.ndim}")
+            # 三个维度下, 在第一个维度上进行拼接
             return torch.concat(list(mm_input))
         else:
+            # 如果是list的情况下，直接拼接
             return torch.concat(mm_input)
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Qwen2VLImageInputs]:
+        """
+        解析验证图像输入
+        """
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
@@ -983,6 +999,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         if pixel_values is not None:
+            # 如果传入了像素
             pixel_values = self._validate_and_reshape_mm_tensor(
                 pixel_values, "image pixel values")
             image_grid_thw = self._validate_and_reshape_mm_tensor(
@@ -992,6 +1009,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 raise ValueError("Incorrect type of image pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
+            # 像素类型的输入
             return Qwen2VLImagePixelInputs(type="pixel_values",
                                            data=pixel_values,
                                            image_grid_thw=image_grid_thw)
@@ -1003,11 +1021,13 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
+            # 图片嵌入类型的输入
             return Qwen2VLImageEmbeddingInputs(type="image_embeds",
                                                data=image_embeds)
 
     def _parse_and_validate_video_input(
             self, **kwargs: object) -> Optional[Qwen2VLVideoInputs]:
+        # TODO: 先不看视频输入
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
 
@@ -1026,12 +1046,14 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _process_image_input(self,
                              image_input: Qwen2VLImageInputs) -> torch.Tensor:
+        # 根据 type 判断
         if image_input["type"] == "image_embeds":
             return image_input["data"].type(self.visual.dtype)
 
-        pixel_values = image_input["data"].type(self.visual.dtype)
+        # 如果输入的是图片像素, 就需要经过视觉模型处理
+        pixel_values = image_input["data"].type(self.visual.dtype)  # (14308, 1176)
         image_embeds = self.visual(pixel_values,
-                                   grid_thw=image_input["image_grid_thw"])
+                                   grid_thw=image_input["image_grid_thw"])  # (1, 3)
         return image_embeds
 
     def _process_video_input(self,
@@ -1049,6 +1071,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: torch.Tensor,
         placeholder_token_id: int,
     ) -> torch.Tensor:
+        """合并多模态嵌入"""
         mask = (input_ids == placeholder_token_id)
         inputs_embeds[mask, :] = multimodal_embeddings
         return inputs_embeds
