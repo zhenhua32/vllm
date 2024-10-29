@@ -112,7 +112,7 @@ class LinearMethodBase(QuantizeMethodBase):
 
 
 class UnquantizedLinearMethod(LinearMethodBase):
-    """Linear method without quantization."""
+    """Linear method without quantization. 没有量化的版本"""
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
@@ -122,7 +122,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
                                        dtype=params_dtype),
-                           requires_grad=False)
+                           requires_grad=False)  # shape 是 (3840, 1280)
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
@@ -132,7 +132,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return F.linear(x, layer.weight, bias)
+        # x 的 shape 是 (14308, 1, 1280)
+        # layer.weight 的 shape 是 (output_dim, input_dim), 即 (3840, 1280)
+        return F.linear(x, layer.weight, bias)  # (14308, 1, 3840)
 
 
 class LinearBase(torch.nn.Module):
@@ -272,8 +274,8 @@ class ColumnParallelLinear(LinearBase):
     """
 
     def __init__(self,
-                 input_size: int,
-                 output_size: int,
+                 input_size: int,  # 1280
+                 output_size: int,  # 3840
                  bias: bool = True,
                  gather_output: bool = False,
                  skip_bias_add: bool = False,
@@ -287,10 +289,10 @@ class ColumnParallelLinear(LinearBase):
         self.gather_output = gather_output
 
         # Divide the weight matrix along the last dimension.
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = get_tensor_model_parallel_world_size()  # 假设是 1
         assert self.quant_method is not None
-        self.output_size_per_partition = divide(self.output_size, tp_size)
-        self.output_partition_sizes = [self.output_size_per_partition]
+        self.output_size_per_partition = divide(self.output_size, tp_size)  # 3840
+        self.output_partition_sizes = [self.output_size_per_partition]  # [3840]
         # If QKV or MergedColumn, use output size of each partition.
         if hasattr(self, "output_sizes"):
             self.output_partition_sizes = [
@@ -299,22 +301,22 @@ class ColumnParallelLinear(LinearBase):
             ]
 
         if output_sizes is None:
-            output_sizes = [output_size]
+            output_sizes = [output_size]  # [3840]
 
         self.quant_method.create_weights(
             layer=self,
-            input_size_per_partition=self.input_size,
-            output_partition_sizes=self.output_partition_sizes,
-            input_size=self.input_size,
-            output_size=self.output_size,
+            input_size_per_partition=self.input_size,  # 1280
+            output_partition_sizes=self.output_partition_sizes,  # [3840]
+            input_size=self.input_size,  # 1280
+            output_size=self.output_size,  # 3840
             params_dtype=self.params_dtype,
             weight_loader=(
                 self.weight_loader_v2 if self.quant_method.__class__.__name__
-                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
+                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))  # 是 weight_loader
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
-                            dtype=params_dtype))
+                            dtype=params_dtype))  # (3840,)
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,
@@ -353,6 +355,7 @@ class ColumnParallelLinear(LinearBase):
             loaded_weight = loaded_weight.reshape(1)
 
         assert param_data.shape == loaded_weight.shape
+        # 将 loaded_weight 的值拷贝到 param_data
         param_data.copy_(loaded_weight)
 
     def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
@@ -364,11 +367,13 @@ class ColumnParallelLinear(LinearBase):
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(self, input_):
+        # input_ 的 shape 是 (14308, 1, 1280)
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
         assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self, input_, bias)
+        # self.weight 的 shape 是 (3840, 1280)
+        output_parallel = self.quant_method.apply(self, input_, bias)  # UnquantizedLinearMethod, (14308, 1, 3840)
         if self.gather_output:
             # All-gather across the partitions.
             output = tensor_model_parallel_all_gather(output_parallel)

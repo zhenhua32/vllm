@@ -192,24 +192,24 @@ class Qwen2VisionAttention(nn.Module):
 
     def __init__(
         self,
-        embed_dim: Optional[int] = None,
-        num_heads: Optional[int] = None,
-        projection_size: Optional[int] = None,
+        embed_dim: Optional[int] = None,  # 1280
+        num_heads: Optional[int] = None,  # 16
+        projection_size: Optional[int] = None,  # 1280
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
-        world_size = parallel_state.get_tensor_model_parallel_world_size()
+        world_size = parallel_state.get_tensor_model_parallel_world_size()  # 假设只有 1卡, 1
         self.hidden_size_per_attention_head = dist_utils.divide(
-            projection_size, num_heads)
+            projection_size, num_heads)  # 80
         self.num_attention_heads_per_partition = dist_utils.divide(
-            num_heads, world_size)
+            num_heads, world_size)  # 16
 
-        self.qkv = ColumnParallelLinear(input_size=embed_dim,
-                                        output_size=3 * projection_size,
+        self.qkv = ColumnParallelLinear(input_size=embed_dim,  # 1280
+                                        output_size=3 * projection_size,  # 3840
                                         quant_config=quant_config)
-        self.proj = RowParallelLinear(input_size=projection_size,
-                                      output_size=embed_dim,
+        self.proj = RowParallelLinear(input_size=projection_size,  # 1280
+                                      output_size=embed_dim,  # 1280
                                       quant_config=quant_config)
 
         # Detect attention implementation.
@@ -226,6 +226,9 @@ class Qwen2VisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor = None,
     ) -> torch.Tensor:
+        # x 的 shape 是 (14308, 1, 1280)
+        # cu_seqlens 的值是 [0, 14308]
+        # rotary_pos_emb 的 shape 是 (14308, 40)
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
 
@@ -304,9 +307,9 @@ class Qwen2VisionBlock(nn.Module):
 
     def __init__(
         self,
-        dim: int,
-        num_heads: int,
-        mlp_ratio: float,
+        dim: int,  # 1280
+        num_heads: int,  # 16
+        mlp_ratio: float,  # 4
         act_layer: Type[nn.Module] = QuickGELU,
         norm_layer: Type[nn.Module] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -316,19 +319,22 @@ class Qwen2VisionBlock(nn.Module):
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
+        mlp_hidden_dim = int(dim * mlp_ratio)  # 5120
 
-        self.attn = Qwen2VisionAttention(embed_dim=dim,
-                                         num_heads=num_heads,
-                                         projection_size=dim,
+        self.attn = Qwen2VisionAttention(embed_dim=dim,  # 1280
+                                         num_heads=num_heads,  # 16
+                                         projection_size=dim,  # 1280
                                          quant_config=quant_config)
-        self.mlp = Qwen2VisionMLP(dim,
-                                  mlp_hidden_dim,
+        self.mlp = Qwen2VisionMLP(dim,  # 1280
+                                  mlp_hidden_dim,  # 5120
                                   act_layer=act_layer,
                                   quant_config=quant_config)
 
     def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
                 rotary_pos_emb: torch.Tensor) -> torch.Tensor:
+        # x 的 shape 是 (14308, 1, 1280)
+        # cu_seqlens 的值是 [0, 14308]
+        # rotary_pos_emb 的 shape 是 (14308, 40)
         x = x + self.attn(self.norm1(x),
                           cu_seqlens=cu_seqlens,
                           rotary_pos_emb=rotary_pos_emb)
