@@ -144,10 +144,11 @@ class Qwen2VisionMLP(nn.Module):
 
 
 def rotate_half(x: torch.Tensor, interleaved: bool = False) -> torch.Tensor:
-    if not interleaved:
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat((-x2, x1), dim=-1)
+    if not interleaved:  # interleaved=False 时
+        x1, x2 = x.chunk(2, dim=-1)  # (1, 14308, 16, 80) -> (1, 14308, 16, 40), (1, 14308, 16, 40)
+        return torch.cat((-x2, x1), dim=-1)  # (1, 14308, 16, 80)
     else:
+        # interleaved 是交错的意思
         x1, x2 = x[..., ::2], x[..., 1::2]
         return rearrange(torch.stack((-x2, x1), dim=-1),
                          "... d two -> ... (d two)",
@@ -162,30 +163,32 @@ def apply_rotary_emb_torch(x: torch.Tensor,
     x: (batch_size, seqlen, nheads, headdim)
     cos, sin: (seqlen, rotary_dim / 2) or (batch_size, seqlen, rotary_dim / 2)
     """
-    ro_dim = cos.shape[-1] * 2
+    # x 的 shape 是 (1, 14308, 16, 80)
+    ro_dim = cos.shape[-1] * 2  # 80
     assert ro_dim <= x.shape[-1]
     cos = repeat(
         cos,
-        "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+        "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")  # (14308, 40) -> (14308, 1, 80)
     sin = repeat(
         sin,
-        "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+        "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")  # (14308, 40) -> (14308, 1, 80)
     return torch.cat(
         [
-            x[..., :ro_dim] * cos +
+            x[..., :ro_dim] * cos +  # (1, 14308, 16, 80)
             rotate_half(x[..., :ro_dim], interleaved) * sin, x[..., ro_dim:]
         ],
         dim=-1,
-    )
+    )  # (1, 14308, 16, 240)
 
 
 def apply_rotary_pos_emb_vision(t: torch.Tensor,
                                 freqs: torch.Tensor) -> torch.Tensor:
-    t_ = t.float()
+    t_ = t.float()  # (1, 14308, 16, 80)
+    # freqs 是 (14308, 40)
     cos = freqs.cos()
     sin = freqs.sin()
     output = apply_rotary_emb_torch(t_, cos, sin).type_as(t)
-    return output
+    return output  # (1, 14308, 16, 240)
 
 
 class Qwen2VisionAttention(nn.Module):
@@ -226,29 +229,30 @@ class Qwen2VisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor = None,
     ) -> torch.Tensor:
+        """返回的 shape 是 (14308, 1, 1280)"""
         # x 的 shape 是 (14308, 1, 1280)
         # cu_seqlens 的值是 [0, 14308]
         # rotary_pos_emb 的 shape 是 (14308, 40)
         # [s, b, c] --> [s, b, head * 3 * head_dim]
-        x, _ = self.qkv(x)
+        x, _ = self.qkv(x)  # (14308, 1, 3840)
 
         # [s, b, head * 3 * head_dim] --> [s, b, head, 3 * head_dim]
         new_x_shape = x.size()[:-1] + (
-            self.num_attention_heads_per_partition,
-            3 * self.hidden_size_per_attention_head,
+            self.num_attention_heads_per_partition,  # 16
+            3 * self.hidden_size_per_attention_head,  # 240
         )
-        x = x.view(*new_x_shape)
+        x = x.view(*new_x_shape)  # (14308, 1, 16, 240)
 
         # [s, b, head, 3 * head_dim] --> 3 [s, b, head, head_dim]
-        q, k, v = dist_utils.split_tensor_along_last_dim(x, 3)
-        batch_size = q.shape[1]
+        q, k, v = dist_utils.split_tensor_along_last_dim(x, 3)  # 每个的 shape 是 (14308, 1, 16, 80)
+        batch_size = q.shape[1]  # 1
 
         q, k, v = [
             rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v)
-        ]
+        ]  # (1, 14308, 16, 80)
         if rotary_pos_emb is not None:
-            q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
-            k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
+            q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)  # (1, 14308, 16, 240)
+            k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)  # (1, 14308, 16, 240)
 
         if self.attn_backend == _Backend.FLASH_ATTN:
             # from vllm_flash_attn.flash_attn_interface import (
@@ -272,20 +276,23 @@ class Qwen2VisionAttention(nn.Module):
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
         elif self.attn_backend == _Backend.TORCH_SDPA:
-            seq_length = q.size(1)
+            seq_length = q.size(1)  # 14308
             q, k, v = [rearrange(x, "b s h d -> b h s d") for x in [q, k, v]]
+            # q 和 k 是 (1, 16, 14308, 240), v 是 (1, 16, 14308, 80)
             attention_mask = torch.zeros([1, seq_length, seq_length],
                                          device=q.device,
-                                         dtype=torch.bool)
+                                         dtype=torch.bool)  # (1, 14308, 14308)
             for i in range(1, len(cu_seqlens)):
+                # i 是 1
                 attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
                                cu_seqlens[i - 1]:cu_seqlens[i]] = True
+                # attention_mask[..., 0:14308, 0:14308] = True
             output = F.scaled_dot_product_attention(q,
                                                     k,
                                                     v,
                                                     attention_mask,
-                                                    dropout_p=0.0)
-            context_layer = rearrange(output, "b h s d -> b s h d ")
+                                                    dropout_p=0.0)  # (1, 16, 14308, 80)
+            context_layer = rearrange(output, "b h s d -> b s h d ")  # (1, 14308, 16, 80)
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
@@ -297,9 +304,9 @@ class Qwen2VisionAttention(nn.Module):
             context_layer = xops.memory_efficient_attention_forward(
                 q, k, v, attn_bias=attn_bias, p=0, scale=None)
         context_layer = rearrange(context_layer,
-                                  "b s h d -> s b (h d)").contiguous()
+                                  "b s h d -> s b (h d)").contiguous()  # (14308, 1, 1280)
 
-        output, _ = self.proj(context_layer)
+        output, _ = self.proj(context_layer)  # (14308, 1, 1280)
         return output
 
 
@@ -338,6 +345,7 @@ class Qwen2VisionBlock(nn.Module):
         x = x + self.attn(self.norm1(x),
                           cu_seqlens=cu_seqlens,
                           rotary_pos_emb=rotary_pos_emb)
+        # attn 返回的 shape 是 (14308, 1, 1280)
         x = x + self.mlp(self.norm2(x))
         return x
 

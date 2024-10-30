@@ -976,8 +976,8 @@ class RowParallelLinear(LinearBase):
     """
 
     def __init__(self,
-                 input_size: int,
-                 output_size: int,
+                 input_size: int,  # 1280
+                 output_size: int,  # 1280
                  bias: bool = True,
                  input_is_parallel: bool = True,
                  skip_bias_add: bool = False,
@@ -992,17 +992,17 @@ class RowParallelLinear(LinearBase):
         self.reduce_results = reduce_results
 
         # Divide the weight matrix along the last dimension.
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.input_size_per_partition = divide(input_size, self.tp_size)
-        assert self.quant_method is not None
+        self.tp_rank = get_tensor_model_parallel_rank()  # 假设是 0
+        self.tp_size = get_tensor_model_parallel_world_size()  # 假设是 1
+        self.input_size_per_partition = divide(input_size, self.tp_size)  # 1280
+        assert self.quant_method is not None  # UnquantizedLinearMethod
 
         self.quant_method.create_weights(
             layer=self,
-            input_size_per_partition=self.input_size_per_partition,
-            output_partition_sizes=[self.output_size],
-            input_size=self.input_size,
-            output_size=self.output_size,
+            input_size_per_partition=self.input_size_per_partition,  # 1280
+            output_partition_sizes=[self.output_size],  # [1280]
+            input_size=self.input_size,  # 1280
+            output_size=self.output_size,  # 1280
             params_dtype=self.params_dtype,
             weight_loader=(
                 self.weight_loader_v2 if self.quant_method.__class__.__name__
@@ -1013,7 +1013,7 @@ class RowParallelLinear(LinearBase):
 
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size, dtype=params_dtype))
+                torch.empty(self.output_size, dtype=params_dtype))  # (1280,)
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,
@@ -1069,8 +1069,8 @@ class RowParallelLinear(LinearBase):
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(self, input_):
-        if self.input_is_parallel:
-            input_parallel = input_
+        if self.input_is_parallel:  # True
+            input_parallel = input_  # (14308, 1, 1280)
         else:
             tp_rank = get_tensor_model_parallel_rank()
             splitted_input = split_tensor_along_last_dim(
@@ -1084,7 +1084,7 @@ class RowParallelLinear(LinearBase):
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self,
                                                   input_parallel,
-                                                  bias=bias_)
+                                                  bias=bias_)  # (14308, 1, 1280)
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
