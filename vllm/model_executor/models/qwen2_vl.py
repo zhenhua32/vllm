@@ -122,24 +122,25 @@ class Qwen2VisionMLP(nn.Module):
 
     def __init__(
         self,
-        in_features: int,
-        hidden_features: int = None,
+        in_features: int,  # 1280
+        hidden_features: int = None,  # 5120
         act_layer: Type[nn.Module] = QuickGELU,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.fc1 = ColumnParallelLinear(in_features,
-                                        hidden_features,
+        self.fc1 = ColumnParallelLinear(in_features,  # 1280
+                                        hidden_features,  # 5120
                                         quant_config=quant_config)
         self.act = act_layer()
-        self.fc2 = RowParallelLinear(hidden_features,
-                                     in_features,
+        self.fc2 = RowParallelLinear(hidden_features,  # 5120
+                                     in_features,  # 1280
                                      quant_config=quant_config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_parallel, _ = self.fc1(x)
+        # x 的 shape 是 (14308, 1, 1280)
+        x_parallel, _ = self.fc1(x)  # (14308, 1, 5120)
         x_parallel = self.act(x_parallel)
-        x, _ = self.fc2(x_parallel)
+        x, _ = self.fc2(x_parallel)  # (14308, 1, 1280)
         return x
 
 
@@ -346,7 +347,7 @@ class Qwen2VisionBlock(nn.Module):
                           cu_seqlens=cu_seqlens,
                           rotary_pos_emb=rotary_pos_emb)
         # attn 返回的 shape 是 (14308, 1, 1280)
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.mlp(self.norm2(x))  # (14308, 1, 1280)
         return x
 
 
@@ -559,7 +560,7 @@ class Qwen2VisionTransformer(nn.Module):
         # transformers
         x = x.unsqueeze(1)  # (14308, 1, 1280)
         for blk in self.blocks:
-            x = blk(x, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
+            x = blk(x, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)  # (14308, 1, 1280)
 
         # adapter
         x = self.merger(x)
