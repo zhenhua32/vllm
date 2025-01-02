@@ -5,24 +5,20 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
-from functools import cached_property, reduce
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
+from functools import reduce
+from typing import Any, Callable, DefaultDict, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Union, cast
+from typing import Set, Tuple, Union
 
 import msgspec
 import torch
 
-from vllm.inputs.parse import is_encoder_decoder_inputs
+from vllm.inputs import SingletonInputs, SingletonInputsAdapter
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
-
-if TYPE_CHECKING:
-    from vllm.inputs import SingletonInputs
-    from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -167,6 +163,8 @@ class SequenceData(msgspec.Struct,
                                    ...] = msgspec.field(default_factory=tuple)
     # The number of tokens that are computed (that run against the model).
     _num_computed_tokens: int = 0
+    # The number of tokens with prefix cache hit.
+    _num_cached_tokens: int = 0
     _stage: SequenceStage = SequenceStage.PREFILL
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
 
@@ -257,7 +255,8 @@ class SequenceData(msgspec.Struct,
         return tuple(self._output_token_ids)
 
     @output_token_ids.setter
-    def output_token_ids(self, new_output_token_ids: List[int]) -> None:
+    def output_token_ids(self,
+                         new_output_token_ids: GenericSequence[int]) -> None:
         self._output_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                        new_output_token_ids)
         self._update_cached_all_tokens()
@@ -322,6 +321,14 @@ class SequenceData(msgspec.Struct,
         if self.get_num_uncomputed_tokens() == 0:
             self._stage = SequenceStage.DECODE
 
+    def get_num_cached_tokens(self) -> int:
+        """Return the number of tokens with prefix cache hit."""
+        return self._num_cached_tokens
+
+    def update_num_cached_tokens(self, num_cached_tokens: int):
+        """Update the number of tokens with prefix cache hit."""
+        self._num_cached_tokens = num_cached_tokens
+
     def reset_state_for_recompute(self) -> None:
         """Reset the number of computed tokens from this sequence. It is
         supposed to be called when a sequence needs to be started from
@@ -379,14 +386,9 @@ class SequenceData(msgspec.Struct,
 class Sequence:
     """Stores the data, status, and block information of a sequence.
 
-    The sequence is constructed from the :code:`SingletonInputs` instance
-    passed in through the :code:`inputs` constructor argument.
-
-    For encoder/decoder models, SingletonInputs encapsulates both a
-    decoder and encoder prompt, creating an ambiguity about which
-    prompt to construct the sequence from. The `from_decoder_prompt`
-    constructor argument signals whether to construct the Sequence
-    from the SingletonInputs decoder prompt, or encoder prompt.
+    The sequence is constructed from the :data:`DecoderOnlyInputs`
+    (for decoder-only) or :data:`EncoderDecoderInputs` (for encoder-decoder)
+    instance passed in through the :code:`inputs` constructor argument.
 
     Args:
         seq_id: The ID of the sequence.
@@ -396,55 +398,23 @@ class Sequence:
         eos_token_id: The end-of-sequence (EOS) token id recognized by this LLM.
         lora_request: LoRA request.
         prompt_adapter_request: Prompt Adapter request.
-        from_decoder_prompt: Construct Sequence from SingletonInputs decoder
-                             prompt (True) or encoder prompt (False.) Must be
-                             True for decoder-only model.
-
     """
 
     def __init__(
         self,
         seq_id: int,
-        inputs: "SingletonInputs",
+        inputs: SingletonInputs,
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        from_decoder_prompt: bool = True,
     ) -> None:
         self.seq_id = seq_id
-        self.inputs = inputs
+        self.inputs = SingletonInputsAdapter(inputs)
         self.block_size = block_size
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
-        self.from_decoder_prompt = from_decoder_prompt
-
-        # For decoder-only models, a Sequence is constructed
-        # from an DecoderOnlyInputs instance (the `inputs` arg.)
-        #
-        # For encoder/decoder models the same `inputs`
-        # instance could be utilized to construct either an
-        # encoder sequence or a decoder sequence, because
-        # `DecoderOnlyInputs` has both decoder- and encoder-oriented
-        # member variables (i.e. it encapsulates both an encoder
-        # and a decoder prompt.) The decision of which type of sequence
-        # to generate is determined by the `from_decoder_prompt` argument.
-        #
-        # When constructing a encoder sequence
-        # (`from_decoder_prompt` False) it matters that
-        # the `DecoderOnlyInputs` instance stored in `inputs` is valid
-        # in the sense that its encoder-related member variables are
-        # populated; below, an exception is raised if this is
-        # not the case.
-        #
-        # When constructing a decoder sequence (`from_decoder_prompt` True)
-        # it does not matter whether `inputs` has its encoder-related
-        # member variables populated.
-        if not (from_decoder_prompt or is_encoder_decoder_inputs(inputs)):
-            raise ValueError("Cannot extract encoder input prompt from "
-                             f"invalid input {inputs}; did you forget the "
-                             "encoder input prompt fields?")
 
         self.data = SequenceData.from_seqs(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
@@ -467,43 +437,33 @@ class Sequence:
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
 
-    @cached_property
+    @property
     def prompt(self) -> Optional[str]:
-        # Select decoder or encoder input prompt str, as appropriate
-        prompt_key: str = ("prompt"
-                           if self.from_decoder_prompt else "encoder_prompt")
+        return self.inputs.prompt
 
-        return cast(Optional[str], self.inputs.get(prompt_key))
-
-    @cached_property
+    @property
     def prompt_token_ids(self) -> List[int]:
-        # Select decoder or encoder input prompt token ids, as appropriate
-        prompt_token_ids_key: str = ("prompt_token_ids"
-                                     if self.from_decoder_prompt else
-                                     "encoder_prompt_token_ids")
+        return self.inputs.prompt_token_ids
 
-        # Cache computed prompt token ids
-        return cast(List[int], self.inputs.get(prompt_token_ids_key))
+    @property
+    def prompt_embeds(self) -> Optional[torch.Tensor]:
+        return self.inputs.prompt_embeds
+
+    @property
+    def token_type_ids(self) -> List[int]:
+        return self.inputs.token_type_ids
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
-        inputs = self.inputs
+        return self.inputs.multi_modal_data
 
-        if (inputs.get("multi_modal_data")
-                and inputs.get("encoder_multi_modal_data")):
-            raise ValueError(
-                "Multi-modal data in both encoder and decoder is not supported."
-            )
-
-        return cast(
-            "MultiModalDataDict",
-            (inputs.get("multi_modal_data")
-             or inputs.get("encoder_multi_modal_data") or {}),
-        )
+    @property
+    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+        return self.inputs.multi_modal_placeholders
 
     @property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
-        return self.inputs.get("mm_processor_kwargs") or {}
+        return self.inputs.mm_processor_kwargs
 
     @property
     def lora_int_id(self) -> int:
@@ -567,6 +527,19 @@ class Sequence:
         hashed_tokens = self.data.get_prefix_token_ids(num_tokens)
         return hash((hashed_tokens, self.lora_int_id))
 
+    def extra_hash(self) -> Optional[int]:
+        """
+        This function computes an extra hash for a sequence, specifically
+        designed for prefix caching mode. The final sequence hash is determined
+        by applying token_ids from the sequence's blocks.
+        """
+        if self.prompt_adapter_id == 0 and self.lora_int_id == 0:
+            return None
+
+        # NOTE: If there are additional factors influencing the block aside from
+        # token_ids, include them as input parameters to the hash.
+        return hash((self.prompt_adapter_id, self.lora_int_id))
+
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size
 
@@ -623,6 +596,9 @@ class Sequence:
             return 1
         return self.data.get_num_uncomputed_tokens()
 
+    def get_num_computed_tokens(self) -> int:
+        return self.data.get_num_computed_tokens()
+
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL
 
@@ -654,10 +630,9 @@ class SequenceGroup:
         sampling_params: The sampling parameters used to generate the outputs.
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
-        embeddings: The embeddings vectors of the prompt of the sequence group
-            for an embedding model.
-        pooling_params: The pooling parameters used to generate the pooling
-            for an embedding model.
+        pooling_params: The parameters used to generate the pooler
+            for a pooling model.
+        pooled_data: The extracted hidden states from a pooling model.
         encoder_seq: Optional, the single encoder sequence. Should be None
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
@@ -672,8 +647,8 @@ class SequenceGroup:
         arrival_time: float,
         sampling_params: Optional[SamplingParams] = None,
         lora_request: Optional[LoRARequest] = None,
-        embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
+        pooled_data: Optional[torch.Tensor] = None,
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -692,11 +667,12 @@ class SequenceGroup:
                                       first_scheduled_time=None,
                                       first_token_time=None,
                                       time_in_queue=None)
+        self.last_token_latency = 0.0
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
-        self.embeddings = embeddings
         self.pooling_params = pooling_params
+        self.pooled_data = pooled_data
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
@@ -729,8 +705,16 @@ class SequenceGroup:
                 if self.encoder_seq is not None else None)
 
     @property
-    def multi_modal_data(self) -> "MultiModalDataDict":
+    def token_type_ids(self) -> Optional[List[int]]:
+        return self.first_seq.token_type_ids
+
+    @property
+    def multi_modal_data(self) -> MultiModalDataDict:
         return self.first_seq.multi_modal_data
+
+    @property
+    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+        return self.first_seq.multi_modal_placeholders
 
     @property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
@@ -779,18 +763,21 @@ class SequenceGroup:
             assert num_lookahead_slots + 1 == num_scheduler_steps or is_prefill
             self.init_multi_step(num_steps=num_lookahead_slots + 1)
 
-    def get_last_latency(self, now: float) -> float:
+    def set_last_token_time(self, now: float) -> None:
         """Sets the last token time for Request level timings."""
-        # If still in prefill phase, raise Error.
-        if self.is_prefill():
-            raise ValueError(
-                "seq_group.get_last_latency() should not be called "
-                "if the seq_group is in prefill phase.")
-
-        # Otherwise return token latency.
-        latency = now - self.metrics.last_token_time
+        # If still in prefill phase, assertion fails.
+        assert not self.is_prefill(), (
+            "seq_group.set_last_token_time() should not be called "
+            "if the seq_group is in prefill phase.")
+        self.last_token_latency = now - self.metrics.last_token_time
         self.metrics.last_token_time = now
-        return latency
+
+    def get_last_token_latency(self) -> float:
+        """Returns the latency of the last token."""
+        assert not self.is_prefill(), (
+            "seq_group.get_last_token_latency() should not be called "
+            "if the seq_group is in prefill phase.")
+        return self.last_token_latency
 
     def maybe_set_first_token_time(self, time: float) -> None:
         """Sets the first token time for Request level timings."""
@@ -922,7 +909,7 @@ class SequenceGroupMetadata(
         multi_modal_data: Multi modal data.
         mm_processor_kwargs: Multimodal input processor / mapper overrides.
         encoder_seq_data: Optional sequence data for encoder prompt
-                          (SequenceGroup.encoder_seq). Should be None 
+                          (SequenceGroup.encoder_seq). Should be None
                           unless you are working with an encoder/decoder
                           model.
         cross_block_table: Optional cross-attention block table associated
@@ -946,7 +933,9 @@ class SequenceGroupMetadata(
         default_factory=lambda: SequenceGroupState())
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
+    token_type_ids: Optional[List[int]] = None
     multi_modal_data: Optional[Any] = None
+    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None
@@ -1060,8 +1049,8 @@ class CompletionSequenceGroupOutput(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
         array_like=True):  # type: ignore[call-arg]
-    __metaclass__ = SequenceGroupOutput
     """The model output associated with a completion sequence group."""
+    __metaclass__ = SequenceGroupOutput
     samples: List[SequenceOutput]
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
@@ -1077,23 +1066,24 @@ class CompletionSequenceGroupOutput(
                 and self.prompt_logprobs == other.prompt_logprobs)
 
 
-class EmbeddingSequenceGroupOutput(
+class PoolingSequenceGroupOutput(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
         array_like=True,  # type: ignore[call-arg]
 ):
-    """The model output associated with an embedding sequence group."""
+    """The model output associated with a pooling sequence group."""
     __metaclass__ = SequenceGroupOutput
-    embeddings: List[int]
+    # Annotated as Any to be compatible with msgspec
+    # The actual type is in SequenceGroup.pooled_data
+    data: Any
 
     def __repr__(self) -> str:
-        return (f"EmbeddingSequenceGroupOutput("
-                f"embeddings_shape={len(self.embeddings)})")
+        return f"PoolingSequenceGroupOutput(data={self.data}"
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, EmbeddingSequenceGroupOutput):
+        if not isinstance(other, PoolingSequenceGroupOutput):
             raise NotImplementedError()
-        return self.embeddings == other.embeddings
+        return self.data == other.data
 
 
 # cannot use msgspec.Struct here because Dynamo does not support it
@@ -1112,7 +1102,7 @@ class IntermediateTensors:
         elif isinstance(key, slice):
             return self.__class__({k: v[key] for k, v in self.tensors.items()})
 
-    def __setitem__(self, key: str, value):
+    def __setitem__(self, key: str, value: torch.Tensor):
         self.tensors[key] = value
 
     def __len__(self):
@@ -1129,15 +1119,13 @@ class PoolerOutput(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
         array_like=True):  # type: ignore[call-arg]
-    """The output from a pooling operation in the embedding model."""
-    outputs: List[EmbeddingSequenceGroupOutput]
+    """The output from a pooling operation in the pooling model."""
+    outputs: List[PoolingSequenceGroupOutput]
 
-    spec_decode_worker_metrics: Optional[SpecDecodeWorkerMetrics] = None
-
-    def __getitem__(self, idx: int) -> EmbeddingSequenceGroupOutput:
+    def __getitem__(self, idx: int) -> PoolingSequenceGroupOutput:
         return self.outputs[idx]
 
-    def __setitem__(self, idx: int, value):
+    def __setitem__(self, idx: int, value: PoolingSequenceGroupOutput):
         self.outputs[idx] = value
 
     def __len__(self):
@@ -1163,7 +1151,7 @@ def get_all_seq_ids_and_request_ids(
     sequence ids.
     """
     seq_ids: List[int] = []
-    request_id_seq_ids_mapping: Dict[str, Set[int]] = defaultdict(set)
+    request_id_seq_ids_mapping: DefaultDict[str, Set[int]] = defaultdict(set)
     for sg in seq_group_metadata_list:
         for seq_id in sg.seq_data:
             seq_ids.append(seq_id)
@@ -1384,7 +1372,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
     @staticmethod
     def add_request(request_id: str, engine, params, **kwargs):
         original_params = params
-        params = copy.deepcopy(original_params)
+        params = original_params.clone()
         params.n = 1
         group = ParallelSampleSequenceGroup(request_id)
         seqs = []
@@ -1410,8 +1398,8 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             arrival_time=seq_group.arrival_time,
             sampling_params=original_params,
             lora_request=seq_group.lora_request,
-            embeddings=seq_group.embeddings,
             pooling_params=seq_group.pooling_params,
+            pooled_data=seq_group.pooled_data,
             encoder_seq=seq_group.encoder_seq,
             trace_headers=seq_group.trace_headers,
             prompt_adapter_request=seq_group.prompt_adapter_request,
